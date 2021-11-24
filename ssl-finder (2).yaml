@@ -1,0 +1,216 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: SSl Finder
+Parameters:
+  SubscriptionEndPoint:
+    Type: String
+    Description: The endpoint email address that receives notifications.
+    Default: example@gmail.com
+  S3BucketName:
+    Type: String
+    Description: Put the s3 Bucket name for storing output. Bucket must be already present in account.
+    Default: example-bucket
+  RegionName:
+    Type: String
+    Description: Put the Region Name.
+    Default: us-east-1
+  SslCertificate:
+    Type: String
+    Description: Put the ssl certificate domain name.
+    Default: example123.com
+  InstanceIds:
+    Type: String
+    Description: Put the sql server instance ids separated by comma.
+    Default: i-0d557dc19765606af
+  SubscriptionProtocol:
+    Type: String
+    Description: The subscription protocol
+    Default: Email
+  CronExpression:
+    Type: String
+    Description: Put the cron for event rule 
+    Default: cron(0 1 ? * MON-FRI *)
+  CronExpression1:
+    Type: String
+    Description: Put the cron for event rule 
+    Default: cron(15 1 ? * MON-FRI *)
+Resources:
+  MySNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Endpoint: !Ref SubscriptionEndPoint
+          Protocol: !Ref SubscriptionProtocol
+      TopicName: "SSlFinderTopic123"
+  
+  LambdaBasicExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  MyCustomFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Environment:
+        Variables:
+          INSTANCE_IDS: !Ref InstanceIds
+          REGION_NAME: !Ref RegionName
+          BUCKET_NAME: !Ref S3BucketName
+      Handler: index.lambda_handler
+      Timeout: 300
+      Role: !GetAtt 'LambdaBasicExecutionRole.Arn'
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import boto3
+          from pprint import pprint
+          from os import getenv
+
+          bucket_name = getenv('BUCKET_NAME')
+          instance_ids = getenv('INSTANCE_IDS')
+          region = getenv('REGION_NAME')
+          instance_id = instance_ids.split(",")
+          print(instance_id)
+
+          ssm_client = boto3.client('ssm', region_name=region)
+
+          def ssl_finder():
+              response = ssm_client.send_command(
+                           InstanceIds= instance_id,
+                           DocumentName="AWS-RunPowerShellScript",
+                           OutputS3BucketName=bucket_name,
+                           Parameters={
+                              'commands':[
+                                   'sl CERT:\LocalMachine\My','ls'
+                                     ]
+                                 },
+                           )
+
+          def lambda_handler(event, context):
+              ssl_finder()
+
+  ScheduledRule: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "ScheduledRule"
+      ScheduleExpression: !Ref CronExpression
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn: 
+            Fn::GetAtt: 
+              - "MyCustomFunction"
+              - "Arn"
+          Id: "TargetFunctionV1"
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: 
+        Ref: "MyCustomFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: 
+        Fn::GetAtt: 
+          - "ScheduledRule"
+          - "Arn"
+
+  MyCustomFunction1:
+    DependsOn: MySNSTopic
+    Type: AWS::Lambda::Function
+    Properties:
+      Environment:
+        Variables:
+          TOPIC_ARN: !Ref MySNSTopic
+          BUCKET_NAME: !Ref S3BucketName
+          SSL_CERTIFICATE: !Ref SslCertificate
+          REGION_NAME: !Ref RegionName
+          INSTANCE_IDS: !Ref InstanceIds
+      Handler: index.lambda_handler
+      Timeout: 300
+      Role: !GetAtt 'LambdaBasicExecutionRole.Arn'
+      Runtime: python3.9
+      Code:
+        ZipFile: |
+          import boto3
+          from pprint import pprint
+          from os import getenv
+
+          bucket_name = getenv('BUCKET_NAME')
+          ssl_certificate = getenv('SSL_CERTIFICATE')
+          topic_arn = getenv('TOPIC_ARN')
+          region = getenv('REGION_NAME')
+          instance_ids = getenv('INSTANCE_IDS')
+          x1 = instance_ids.split(",")
+          print(x1)
+
+          client_sns = boto3.client('sns',region_name=region)
+          s3 = boto3.resource('s3', region_name=region)
+
+          def ssl_finder():
+              try:
+                  list_instance = []
+                  bucket = s3.Bucket(bucket_name)
+                  for obj in bucket.objects.all():
+                      key = obj.key
+                      body = obj.get()['Body'].read()
+                      # print(body.decode("utf-8"))
+                      body1 = body.decode("utf-8")
+                      key1=str(key)
+                      x = key1.split("/")
+                      if ssl_certificate in body1:
+                          list_instance.append(x[1])
+                          print('String', ssl_certificate,x[1], 'Found In File')
+                      else:
+                          print('String', ssl_certificate,x[1], 'Not Found')
+                  print(list_instance)
+                  no_ssl = []
+                  for each in x1:
+                      if each not in list_instance:
+                          no_ssl.append(each)
+                  print(no_ssl)
+                  if no_ssl != []:
+                      msg = 'Certificate Not Found for these instances: '+str(no_ssl)
+                      response = client_sns.publish(
+                          TopicArn=topic_arn,
+                          Message= msg,
+                          Subject="SSL Notifications"
+                      )
+              except Exception as e:
+                  print(e)
+
+
+          def lambda_handler(event, context):
+              ssl_finder()
+
+  ScheduledRule1: 
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: "ScheduledRule"
+      ScheduleExpression: !Ref CronExpression1
+      State: "ENABLED"
+      Targets: 
+        - 
+          Arn: 
+            Fn::GetAtt: 
+              - "MyCustomFunction1"
+              - "Arn"
+          Id: "TargetFunction"
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: 
+        Ref: "MyCustomFunction1"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: 
+        Fn::GetAtt: 
+          - "ScheduledRule1"
+          - "Arn"
